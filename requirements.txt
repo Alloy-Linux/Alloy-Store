@@ -1,3 +1,5 @@
 PyGObject
 pycairo
 requests
+lxml
+pyyaml

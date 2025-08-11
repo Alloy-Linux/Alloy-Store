@@ -1,13 +1,12 @@
 import sys
 import gi
-from landing import create_landing
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib
-import concurrent.futures
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+from gi.repository import Gtk, Adw
+
+from landing import create_landing
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, *args, **kwargs):
@@ -15,38 +14,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         self.set_child(self.main_box)
-
-        self.loading_label = Gtk.Label(label="Loading packages...")
-        self.loading_label.set_margin_top(20)
-        self.loading_label.set_margin_bottom(20)
-        self.loading_label.set_margin_start(20)
-        self.loading_label.set_margin_end(20)
-        self.loading_label.add_css_class("title-1")
-        self.main_box.append(self.loading_label)
         self.set_resizable(True)
 
-        future = executor.submit(self.load_packages)
-        future.add_done_callback(self.on_packages_loaded)
-
-    def load_packages(self):
-        from landing import get_random_packages
-        packages = get_random_packages()
-        return packages
-
-    def on_packages_loaded(self, future):
-        try:
-            packages = future.result()
-        except Exception as e:
-            packages = f"Error loading packages: {e}"
-
-        GLib.idle_add(self.show_app, packages)
-
-    def show_app(self, packages):
-        for child in list(self.main_box):
-            self.main_box.remove(child)
-
         self.create_sidebar()
-        create_landing(self.main_box, initial_packages=packages)
+        create_landing(self.main_box)
 
     def create_sidebar(self):
         self.sidebar = Gtk.Box(

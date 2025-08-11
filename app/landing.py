@@ -1,15 +1,70 @@
-import subprocess
 import gi
-import concurrent.futures
+import yaml
+import gzip
+import os
+import sys
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 
 from gi.repository import Gtk, GLib
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+APPSTREAM_YAML_PATH = os.environ.get("NIXOS_APPSTREAM_DATA")
 
-def create_landing(container, initial_packages=None):
+icons_base_dir = None
+if APPSTREAM_YAML_PATH and os.path.isfile(APPSTREAM_YAML_PATH):
+    share_app_info_dir = os.path.dirname(os.path.dirname(APPSTREAM_YAML_PATH))
+    icons_base_dir = os.path.join(share_app_info_dir, "icons", "nixos", "64x64")
+else:
+    icons_base_dir = None
+
+ICON_BASE_PATH = icons_base_dir
+
+
+def load_apps_streamed(limit=None):
+    try:
+        if not os.path.isfile(APPSTREAM_YAML_PATH):
+            raise FileNotFoundError(f"Appstream YAML not found: {APPSTREAM_YAML_PATH}")
+
+        count = 0
+        with gzip.open(APPSTREAM_YAML_PATH, 'rt', encoding='utf-8') as f:
+            for doc in yaml.safe_load_all(f):
+                if not isinstance(doc, dict):
+                    continue
+                if doc.get("Type") != "desktop-application":
+                    continue
+
+                name_data = doc.get('Name', 'Unknown')
+                name = name_data.get('C') if isinstance(name_data, dict) else name_data
+
+                summary_data = doc.get('Summary', 'No description')
+                summary = summary_data.get('C') if isinstance(summary_data, dict) else summary_data
+
+                icon_name = 'application-x-executable'
+                icon_info = doc.get('Icon', {})
+                if isinstance(icon_info, dict) and 'cached' in icon_info and len(icon_info['cached']) > 0:
+                    cached_entry = icon_info['cached'][0]
+                    if isinstance(cached_entry, dict):
+                        icon_name = cached_entry.get('name', icon_name)
+                elif isinstance(icon_info, str):
+                    icon_name = icon_info
+
+                yield {
+                    'name': name or 'Unknown',
+                    'summary': summary or 'No description',
+                    'icon': icon_name,
+                }
+
+                count += 1
+                if limit and count >= limit:
+                    break
+
+    except Exception as e:
+        print(f"Error streaming appstream data: {e}", file=sys.stderr)
+        yield {'name': 'Error', 'summary': str(e), 'icon': 'dialog-error'}
+
+
+def create_landing(container):
     grid = Gtk.Grid()
     grid.set_row_spacing(24)
     grid.set_column_spacing(24)
@@ -17,99 +72,90 @@ def create_landing(container, initial_packages=None):
     grid.set_margin_end(24)
     grid.set_margin_top(24)
     grid.set_margin_bottom(24)
-
     grid.set_column_homogeneous(True)
     container.append(grid)
 
-    def clear_grid_children():
-        child = grid.get_first_child()
-        while child is not None:
-            next_child = child.get_next_sibling()
-            grid.remove(child)
-            child = next_child
+    create_landing.app_count = 0
+    max_apps = 6
 
-    def update_grid(packages_str):
-        clear_grid_children()
-        packages = packages_str.split("\n")
+    def add_app_tile(app):
+        i = create_landing.app_count
+        if i >= max_apps:
+            return False
 
-        for i, pkg in enumerate(packages):
-            display_name = pkg.split('.')[-1]
+        create_landing.app_count += 1
 
-            button = Gtk.Button()
-            button.set_hexpand(True)
-            button.set_vexpand(False)
-            button.set_margin_top(6)
-            button.set_margin_bottom(6)
-            button.set_margin_start(6)
-            button.set_margin_end(6)
+        display_name = app.get('name', 'Unknown')
+        description = app.get('summary', 'No description')
+        icon_name = app.get('icon', 'application-x-executable')
 
-            hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-            hbox.set_hexpand(True)
+        button = Gtk.Button()
+        button.set_hexpand(True)
+        button.set_vexpand(False)
+        button.set_margin_top(6)
+        button.set_margin_bottom(6)
+        button.set_margin_start(6)
+        button.set_margin_end(6)
 
-            icon = Gtk.Image.new_from_icon_name("application-x-executable")
-            icon.set_valign(Gtk.Align.CENTER)
-            icon.set_pixel_size(128)
+        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        hbox.set_hexpand(True)
 
-            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            vbox.set_hexpand(True)
+        icon_path = None
+        if ICON_BASE_PATH:
+            candidate_name = icon_name
+            if not icon_name.lower().endswith('.png'):
+                candidate_name = icon_name + ".png"
+            candidate = os.path.join(ICON_BASE_PATH, candidate_name)
+            if os.path.isfile(candidate):
+                icon_path = candidate
+            else:
+                print(f"[DEBUG] Icon file not found: {candidate}", file=sys.stderr)
 
-            title_label = Gtk.Label(label=display_name)
-            title_label.set_xalign(0)
-            title_label.add_css_class("title-3")
-            title_label.set_hexpand(True)
+        if icon_path:
+            icon = Gtk.Image.new_from_file(icon_path)
+        else:
+            icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.set_valign(Gtk.Align.CENTER)
+        icon.set_pixel_size(64)
 
-            description_label = Gtk.Label(label=f"Description for {display_name}")
-            description_label.set_xalign(0)
-            description_label.add_css_class("dim-label")
-            description_label.set_wrap(True)
-            description_label.set_max_width_chars(30)
-            description_label.set_hexpand(True)
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        vbox.set_hexpand(True)
 
-            vbox.append(title_label)
-            vbox.append(description_label)
+        title_label = Gtk.Label(label=display_name)
+        title_label.set_xalign(0)
+        title_label.add_css_class("title-3")
+        title_label.set_hexpand(True)
 
-            hbox.append(icon)
-            hbox.append(vbox)
+        description_label = Gtk.Label(label=description)
+        description_label.set_xalign(0)
+        description_label.add_css_class("dim-label")
+        description_label.set_wrap(True)
+        description_label.set_max_width_chars(30)
+        description_label.set_hexpand(True)
 
-            button.set_child(hbox)
+        vbox.append(title_label)
+        vbox.append(description_label)
 
-            row = i // 3
-            col = i % 3
-            grid.attach(button, col, row, 1, 1)
+        hbox.append(icon)
+        hbox.append(vbox)
 
-    if initial_packages:
-        update_grid(initial_packages)
-    else:
-        def on_packages_ready(future):
-            try:
-                packages = future.result()
-                GLib.idle_add(update_grid, packages)
-            except Exception as e:
-                GLib.idle_add(print, f"Error: {e}")
+        button.set_child(hbox)
 
-        future = executor.submit(get_random_packages)
-        future.add_done_callback(on_packages_ready)
+        row = i // 3
+        col = i % 3
+        grid.attach(button, col, row, 1, 1)
 
+        return False
 
-def get_random_packages(amount_of_packages: str = "6") -> str:
-    try:
-        p1 = subprocess.Popen(
-            ["nix", "search", "nixpkgs", "--json", "^"],
-            stdout=subprocess.PIPE
-        )
-        p2 = subprocess.Popen(
-            ["jq", "-r", "keys[]"],
-            stdin=p1.stdout, stdout=subprocess.PIPE
-        )
-        p3 = subprocess.Popen(
-            ["shuf", "-n", amount_of_packages],
-            stdin=p2.stdout, stdout=subprocess.PIPE
-        )
+    import concurrent.futures
 
-        p1.stdout.close()
-        p2.stdout.close()
+    def load_and_add_apps():
+        count = 0
+        for app in load_apps_streamed():
+            if count >= max_apps:
+                break
+            GLib.idle_add(add_app_tile, app)
+            count += 1
 
-        output = p3.communicate()[0].decode().strip()
-        return output
-    except Exception as e:
-        return f"Error getting packages: {e}"
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    executor.submit(load_and_add_apps)
