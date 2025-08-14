@@ -3,3 +3,4 @@ pycairo
 requests
 lxml
 pyyaml
+pygobject-stubs

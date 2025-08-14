@@ -1,12 +1,14 @@
-import gi
 import os
 import sys
 import html
 import re
-from gi.repository import Gtk, GdkPixbuf, Gio, GLib
+import gi
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
+
+from gi.repository import Gtk, Adw, Gio, GdkPixbuf, GLib
+from landing import GENERIC_ICON_NAMES
 
 APPSTREAM_YAML_PATH = os.environ.get("NIXOS_APPSTREAM_DATA")
 
@@ -77,13 +79,29 @@ class DetailPage(Gtk.ScrolledWindow):
             if os.path.isfile(candidate):
                 icon_path = candidate
 
-        try:
-            if icon_path:
+        icon_image = None
+        placeholder_path = os.path.join(os.path.dirname(__file__), "..", "images", "placeholder.png")
+        placeholder_exists = os.path.exists(placeholder_path)
+        source_type = app_info.get('source_type', 'local_appstream')
+        icon_name = app_info['icon']
+
+        if icon_name in GENERIC_ICON_NAMES:
+            if placeholder_exists:
+                icon_image = Gtk.Image.new_from_file(placeholder_path)
+        else:
+            if source_type == 'flatpak':
+                flatpak_icon_path = os.path.join(os.path.expanduser('~'), '.local', 'share', 'flatpak', 'appstream', 'flathub', 'x86_64', 'active', 'icons', '128x128', f"{icon_name}.png")
+                if os.path.exists(flatpak_icon_path):
+                    icon_image = Gtk.Image.new_from_file(flatpak_icon_path)
+
+            if not icon_image and icon_path and os.path.exists(icon_path):
                 icon_image = Gtk.Image.new_from_file(icon_path)
+
+        if not icon_image:
+            if placeholder_exists:
+                icon_image = Gtk.Image.new_from_file(placeholder_path)
             else:
-                icon_image = Gtk.Image.new_from_icon_name(app_info['icon'])
-        except Exception:
-            icon_image = Gtk.Image.new_from_icon_name("image-missing")
+                icon_image = Gtk.Image.new_from_icon_name("image-missing")
 
         icon_image.set_pixel_size(128)
         icon_image.set_valign(Gtk.Align.CENTER)
@@ -117,7 +135,74 @@ class DetailPage(Gtk.ScrolledWindow):
             homepage_link.set_halign(Gtk.Align.START)
             info_box.append(homepage_link)
 
-        desc_text = html_to_pango(app_info['description'])
+        install_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        install_box.set_valign(Gtk.Align.START)
+        install_box.set_halign(Gtk.Align.END)
+        header_box.append(install_box)
+
+        source_type = app_info.get('source_type', 'local_appstream')
+
+        def on_install_clicked(button):
+            install_id = None
+            method = ""
+
+            if source_type == 'flatpak':
+                install_id = app_info.get('flatpak_ref')
+                method = 'flatpak'
+            else:
+                install_id = app_info.get('nix_package_attribute')
+                method = f"nixpkgs ({self.install_method})"
+
+            if install_id:
+                print(f"Installing {install_id} ({method})")
+            
+            # TODO: Install logic
+
+        if source_type == 'flatpak':
+            install_button = Gtk.Button(label="Install")
+            install_button.get_style_context().add_class("suggested-action")
+            install_button.set_size_request(120, 30)
+            install_button.connect("clicked", on_install_clicked)
+            install_box.append(install_button)
+        else: # It's a nix package
+            install_button = Gtk.Button(label="Install (User)")
+            install_button.get_style_context().add_class("suggested-action")
+            install_button.set_size_request(120, 30)
+
+            self.install_method = "user"
+            self.nix_package_attribute = app_info.get('nix_package_attribute', 'N/A')
+
+            install_button.connect("clicked", on_install_clicked)
+            install_box.append(install_button)
+
+            menu_button = Gtk.MenuButton()
+            menu_button.set_tooltip_text("Choose installation method")
+
+            menu = Gio.Menu()
+            menu.append("User Installation", "app.install.user")
+            menu.append("System Installer", "app.install.system")
+            menu_button.set_menu_model(menu)
+
+            def on_menu_item_selected(action, param):
+                method = action.get_name().split('.')[-1]
+                self.install_method = method
+                install_button.set_label(f"Install ({method.capitalize()})")
+
+            app = Gio.Application.get_default()
+            if not app:
+                app = Gio.Application()
+
+            for method in ("user", "system"):
+                action_name = f"install.{method}"
+                action = Gio.SimpleAction.new(action_name, None)
+                action.connect("activate", on_menu_item_selected)
+                action.set_enabled(self.nix_package_attribute != 'N/A')
+                app.add_action(action)
+
+            install_box.append(menu_button)
+
+        description_content = app_info.get('description') or ""
+        desc_text = html_to_pango(description_content)
         desc_label = Gtk.Label(label=desc_text)
         desc_label.set_use_markup(True)
         desc_label.set_halign(Gtk.Align.START)
@@ -144,53 +229,43 @@ class DetailPage(Gtk.ScrolledWindow):
             screenshots_scrolled_window.set_child(screenshots_flowbox)
 
             for shot_url in app_info['screenshots']:
-                try:
-                    img = Gtk.Image()
+                img = Gtk.Image()
 
-                    def on_download_complete(source, result, img_to_update=img):
-                        try:
-                            stream = Gio.File.read_finish(source, result)
-                            if not stream:
-                                print("[DEBUG] Stream is None")
-                                return
+                def on_download_complete(source, result, img_to_update=img):
+                    stream = Gio.File.read_finish(source, result)
+                    if not stream:
+                        return
 
-                            pixbuf_loader = GdkPixbuf.PixbufLoader.new()
+                    pixbuf_loader = GdkPixbuf.PixbufLoader.new()
 
-                            data = stream.read_bytes(4096, None)
-                            while data.get_size() > 0:
-                                pixbuf_loader.write(data.get_data())
-                                data = stream.read_bytes(4096, None)
+                    data = stream.read_bytes(4096, None)
+                    while data.get_size() > 0:
+                        pixbuf_loader.write(data.get_data())
+                        data = stream.read_bytes(4096, None)
 
-                            pixbuf_loader.close()
+                    pixbuf_loader.close()
 
-                            pixbuf = pixbuf_loader.get_pixbuf()
-                            if pixbuf:
-                                width = pixbuf.get_width()
-                                height = pixbuf.get_height()
-                                print(f"[DEBUG] Original image size: {width}x{height}")
+                    pixbuf = pixbuf_loader.get_pixbuf()
+                    if pixbuf:
+                        width = pixbuf.get_width()
+                        height = pixbuf.get_height()
 
-                                fixed_width = 800
-                                fixed_height = 450
-                                print(f"[DEBUG] Scaling image to fixed size: {fixed_width}x{fixed_height}")
+                        fixed_width = 800
+                        fixed_height = 450
 
-                                scaled_pixbuf = pixbuf.scale_simple(fixed_width, fixed_height,
-                                                                    GdkPixbuf.InterpType.BILINEAR)
-                                img_to_update.set_from_pixbuf(scaled_pixbuf)
-                                img_to_update.set_size_request(fixed_width, fixed_height)
-                                print(f"[DEBUG] Set image size request to: {fixed_width}x{fixed_height}")
+                        scaled_pixbuf = pixbuf.scale_simple(fixed_width, fixed_height,
+                                                                GdkPixbuf.InterpType.BILINEAR)
+                        img_to_update.set_from_pixbuf(scaled_pixbuf)
+                        img_to_update.set_size_request(fixed_width, fixed_height)
 
-                            stream.close()
-                        except Exception as e:
-                            print(f"[ERROR] Failed to load image from URL: {e}", file=sys.stderr)
+                    stream.close()
 
-                    cancellable = Gio.Cancellable.new()
-                    file = Gio.File.new_for_uri(shot_url)
-                    file.read_async(GLib.PRIORITY_DEFAULT, cancellable, on_download_complete, img)
+                cancellable = Gio.Cancellable.new()
+                file = Gio.File.new_for_uri(shot_url)
+                file.read_async(GLib.PRIORITY_DEFAULT, cancellable, on_download_complete, img)
 
-                    screenshots_flowbox.append(img)
-                except Exception as e:
-                    print(f"[ERROR] Could not load screenshot {shot_url}: {e}", file=sys.stderr)
+                screenshots_flowbox.append(img)
 
     def on_back_clicked(self, button):
         if self.parent_window:
-            self.parent_window.show_landing()
+            self.parent_window.go_back()
