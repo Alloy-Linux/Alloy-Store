@@ -26,7 +26,14 @@
             buildInputs = [
               apm.packages.${system}.default
               pkgs.python3
+
               pkgs.python3Packages.pygobject3
+              python313Packages.pycairo
+              python313Packages.requests
+              python313Packages.lxml
+              python313Packages.pyyaml
+              python313Packages.pygobject-stubs
+
               pkgs.pkg-config
               pkgs.cairo
               pkgs.gtk4
@@ -37,7 +44,6 @@
 
             shellHook = ''
               export NIXOS_APPSTREAM_DATA="${appstreamPath}"
-              source .venv/bin/activate
               alias run="python3 app/main.py"
               echo "dev shell loaded"
             '';
